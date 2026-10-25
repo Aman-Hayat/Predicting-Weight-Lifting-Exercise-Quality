@@ -1,0 +1,116 @@
+---
+title: "Predicting Weight Lifting Exercise Quality"
+author: "Aman"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Summary
+
+The goal is to predict the `classe` variable (A to E), which describes how a participant performed a barbell lift, using accelerometer data from the belt, forearm, arm and dumbbell. A is the correct form, and B to E are four common mistakes. I trained a random forest with 5-fold cross-validation, held out 30% of the training data to estimate out-of-sample error, and used the final model to predict the 20 test cases.
+
+Data source: Velloso, E., Bulling, A., Gellersen, H., Ugulino, W., Fuks, H. *Qualitative Activity Recognition of Weight Lifting Exercises.* Proceedings of the 4th Augmented Human International Conference, 2013. http://groupware.les.inf.puc-rio.br/har
+
+## Loading and cleaning the data
+
+```{r load}
+library(caret)
+library(randomForest)
+
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url  <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+training <- read.csv(train_url, na.strings = c("NA", "", "#DIV/0!"))
+testing  <- read.csv(test_url,  na.strings = c("NA", "", "#DIV/0!"))
+dim(training)
+```
+
+Cleaning steps and why:
+
+1. **Dropped the first 7 columns** (row index, user name, timestamps, window info). They are identifiers, not sensor measurements, and would let the model "cheat" on this dataset without generalizing.
+2. **Dropped columns that are mostly NA** (more than 90% missing). These are summary statistics (kurtosis, skewness, etc.) only filled in on window-end rows, and are empty in the test set anyway.
+3. Applied the same column selection to the test set.
+
+```{r clean}
+training <- training[, -(1:7)]
+training <- training[, colMeans(is.na(training)) < 0.9]
+training$classe <- factor(training$classe)
+
+predictor_cols <- setdiff(names(training), "classe")
+testing <- testing[, predictor_cols]
+
+length(predictor_cols)
+```
+
+This leaves `r length(predictor_cols)` predictors and no missing values.
+
+```{r classplot, fig.height=3.5, fig.width=5, fig.cap="Figure 1: Distribution of the classe outcome in the training data."}
+barplot(table(training$classe), col = "steelblue",
+        xlab = "classe", ylab = "Count")
+```
+
+The classes are reasonably balanced (A is somewhat more frequent), so plain accuracy is a fair metric.
+
+## Model building
+
+I split the training data 70/30 into a training set and a validation set. The validation set is never used for fitting or tuning, so it gives an honest estimate of out-of-sample error.
+
+I chose a **random forest** because it handles many correlated numeric predictors, needs little preprocessing (no scaling required), captures non-linear interactions, and is known to work very well on this kind of sensor data.
+
+**Cross-validation:** 5-fold CV inside the 70% training split, used to pick the `mtry` tuning parameter and to get a CV estimate of accuracy.
+
+```{r model}
+set.seed(123)
+in_train <- createDataPartition(training$classe, p = 0.7, list = FALSE)
+trn <- training[in_train, ]
+val <- training[-in_train, ]
+
+ctrl <- trainControl(method = "cv", number = 5)
+
+fit <- train(classe ~ ., data = trn, method = "rf",
+             trControl = ctrl, ntree = 100)
+fit
+```
+
+```{r cvplot, fig.height=3.5, fig.width=5, fig.cap="Figure 2: Cross-validated accuracy by number of predictors tried at each split (mtry)."}
+plot(fit)
+```
+
+The best CV accuracy was **`r round(max(fit$results$Accuracy), 4)`** (mtry = `r fit$bestTune$mtry`).
+
+## Out-of-sample error
+
+```{r validate}
+pred_val <- predict(fit, val)
+cm <- confusionMatrix(pred_val, val$classe)
+cm$table
+cm$overall["Accuracy"]
+```
+
+Accuracy on the held-out validation set is **`r round(cm$overall["Accuracy"], 4)`**, so the **expected out-of-sample error is about `r round(1 - cm$overall["Accuracy"], 4)`** (`r round(100 * (1 - cm$overall["Accuracy"]), 2)`%). The cross-validation estimate (`r round(1 - max(fit$results$Accuracy), 4)` error) agrees closely with this, which suggests the model is not overfitting. The error on the final 20 test cases should be similar, with the caveat that 20 samples is a tiny sample, so the observed result can vary a lot by chance.
+
+## Predictions for the 20 test cases
+
+```{r predict}
+test_pred <- predict(fit, testing)
+data.frame(problem_id = 1:20, prediction = test_pred)
+```
+
+```{r write, eval=FALSE}
+# Optional: write one file per prediction (not run during knit)
+for (i in seq_along(test_pred)) {
+  write.table(as.character(test_pred[i]),
+              file = paste0("problem_id_", i, ".txt"),
+              quote = FALSE, row.names = FALSE, col.names = FALSE)
+}
+```
+
+## Conclusion
+
+A random forest with 5-fold cross-validation, trained on 52 sensor predictors after removing identifier and mostly-empty columns, achieved roughly 99% accuracy on held-out data. The expected out-of-sample error is under 1%, and this model was used to generate the predictions above for the quiz.
